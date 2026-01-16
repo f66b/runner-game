@@ -1,0 +1,61 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id               String   @id @default(uuid())
+  username         String   @unique
+  balance          BigInt   @default(0)
+  runCount         Int      @default(0)
+  incentiveClaimed Boolean  @default(false)
+  hasPlayedOnce    Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  runs             Run[]
+}
+
+model Run {
+  id              String    @id @default(uuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id])
+  
+  // Run parameters
+  difficulty      Int       // 0-100
+  percentMin      Int       // 0-100
+  percentMax      Int       // 0-100
+  curveMode       String    // static, proportional, disproportional
+  
+  // RNG seeds
+  serverSeed      String
+  seedCommit      String
+  clientSeed      String?
+  seedReveal      String?
+  
+  // Bankroll tracking (stored as BigInt for USDC 6 decimals)
+  startWalletBalance BigInt
+  lockedBankroll     BigInt
+  currentBankroll    BigInt?
+  endBankroll        BigInt?
+  
+  // Run nonce for replay protection
+  runNonce        Int
+  
+  // Exit handling
+  exitType        String?   // safe, pause, forfeit, loss
+  eventsDigest    String?
+  
+  // Pause/resume snapshot
+  snapshot        String?   // JSON serialized game state
+  
+  // Timestamps
+  startedAt       DateTime  @default(now())
+  endedAt         DateTime?
+  pausedAt        DateTime?
+  
+  @@index([userId])
+}
