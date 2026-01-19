@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: runner-backend
+    runtime: docker
+    rootDir: backend
+    plan: free
+    region: oregon 
+    envVars:
+      - key: PORT
+        value: 3001
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: runner-db
+          property: connectionString
+
+databases:
+  - name: runner-db
+    databaseName: runner
+    user: runner
+    plan: free 
+    ipAllowList: [] 

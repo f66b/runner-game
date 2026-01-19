@@ -1,5 +1,4 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3001';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
 
 export interface AuthResponse {
     token: string;
@@ -35,6 +34,13 @@ export interface RunReceipt {
     endBankroll: string;
     netDelta: string;
     serverSeed: string;
+}
+
+export interface RunCompleteParams {
+    runId: string;
+    inputs: any[];
+    finalBankroll: string;
+    exitType: string;
 }
 
 class ApiClient {
@@ -106,13 +112,6 @@ class ApiClient {
         });
     }
 
-    async claimIncentive(): Promise<void> {
-        // Mock implementation or remove if not needed anymore
-        // For now, let's keep it but simplified or just throw error as it was crypto specific
-        // Actually, we can just remove it from frontend UI mostly.
-        throw new Error("Incentive claim deprecated");
-    }
-
     // Run
     async startRun(params: {
         lockedBankroll: string;
@@ -128,31 +127,11 @@ class ApiClient {
         });
     }
 
-    async checkpointExit(runId: string): Promise<{ success: boolean }> {
-        return this.fetch('/run/checkpoint/exit', {
+    async completeRun(params: RunCompleteParams): Promise<{ success: boolean; verifiedBankroll: string; serverSeed: string }> {
+        return this.fetch('/run/complete', {
             method: 'POST',
-            body: JSON.stringify({ runId }),
+            body: JSON.stringify(params),
         });
-    }
-
-    async checkpointPause(runId: string): Promise<{ success: boolean }> {
-        return this.fetch('/run/checkpoint/pause', {
-            method: 'POST',
-            body: JSON.stringify({ runId }),
-        });
-    }
-
-    async resumeRun(runId: string): Promise<{ runId: string; snapshot: string; params: Record<string, unknown> }> {
-        return this.fetch('/run/resume', {
-            method: 'POST',
-            body: JSON.stringify({ runId }),
-        });
-    }
-
-    // WebSocket
-    createGameConnection(runId: string): WebSocket {
-        const token = this.getToken();
-        return new WebSocket(`${WS_URL}/ws/run?runId=${runId}&token=${token}`);
     }
 }
 

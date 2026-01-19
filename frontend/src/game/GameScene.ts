@@ -49,9 +49,7 @@ export interface GameState {
 
 export interface GameCallbacks {
     onInput: (type: 'jump' | 'slide') => void;
-    onCheckpointExit: () => void;
-    onCheckpointPause: () => void;
-    onCheckpointContinue: () => void;
+    onUpdate: (time: number, delta: number) => GameState | null; // Called every frame to tick simulation
 }
 
 // ============ Game Scene ============
@@ -237,7 +235,7 @@ export class GameScene extends Phaser.Scene {
         }
     }
 
-    update() {
+    update(time: number, delta: number) {
         // Keyboard input
         if (this.keys) {
             if (Phaser.Input.Keyboard.JustDown(this.spaceKey) || Phaser.Input.Keyboard.JustDown(this.keys.up)) {
@@ -245,6 +243,14 @@ export class GameScene extends Phaser.Scene {
             }
             if (Phaser.Input.Keyboard.JustDown(this.downKey) || Phaser.Input.Keyboard.JustDown(this.keys.down)) {
                 this.handleSlide();
+            }
+        }
+
+        // Tick simulation via callback
+        if (this.callbacks && this.callbacks.onUpdate) {
+            const newState = this.callbacks.onUpdate(time, delta);
+            if (newState) {
+                this.updateGameState(newState);
             }
         }
 

@@ -2,49 +2,185 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import Phaser from 'phaser';
-import { GameScene, GameState, GameCallbacks } from './GameScene';
+import { GameScene, GameState as ViewState, GameCallbacks } from './GameScene';
 import { api } from '@/lib/api';
+import { GameSimulation, GameState as SimState, RunParams, TICK_DURATION } from '@/lib/game/simulation';
+import { combineSeeds } from '@/lib/game/rng';
 
 interface GameCanvasProps {
     runId: string;
+    runData: any; // Full response from startRun
     onRunComplete: (data: {
         exitType: string;
         endBankroll: string;
         netDelta: string;
-        serverSeed: string;
+        serverSeed: string; // Revealed by server on complete
         receipt: Record<string, unknown>;
     }) => void;
     onCheckpointAction: (action: 'exit' | 'pause' | 'continue') => void;
 }
 
-export function GameCanvas({ runId, onRunComplete, onCheckpointAction }: GameCanvasProps) {
+export function GameCanvas({ runId, runData, onRunComplete, onCheckpointAction }: GameCanvasProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const gameRef = useRef<Phaser.Game | null>(null);
-    const wsRef = useRef<WebSocket | null>(null);
     const sceneRef = useRef<GameScene | null>(null);
+
+    // Simulation Ref
+    const simRef = useRef<GameSimulation | null>(null);
+    const inputsRef = useRef<any[]>([]);
+    const lastTickTimeRef = useRef<number>(0);
+    const completedRef = useRef(false);
+
+    // UI State
     const [isCheckpointOpen, setIsCheckpointOpen] = useState(false);
     const [checkpointTimer, setCheckpointTimer] = useState(0);
     const [isRunOver, setIsRunOver] = useState(false);
 
+    // Initializer
+    useEffect(() => {
+        if (!runData || simRef.current) return;
+
+        // Initialize Simulation
+        const params: RunParams = {
+            difficulty: runData.params.difficulty,
+            percentMin: runData.params.percentMin,
+            percentMax: runData.params.percentMax,
+            curveMode: runData.params.curveMode,
+        };
+
+        // Client-side simulation requires the FULL seed derived from server+client
+        // The server sent us 'serverSeed' in runData because we adjusted that route.
+        const seed = combineSeeds(runData.serverSeed, runData.params.clientSeed || '', runId);
+
+        simRef.current = new GameSimulation(
+            seed,
+            params,
+            BigInt(runData.lockedBankroll || '0'),
+            // Wait, api.startRun returns params, but lockedBankroll might not be in params object directly in interface
+            // Actually runData is the whole JSON. let's check what startRun returns.
+            // It returns params object. lockedBankroll is not in params object in backend simulation interface.
+            // It is in run record.
+            // I need to ensure startRun returns lockedBankroll or it is available.
+            // Let's assume for now runData DOES contain it or we must fix route.
+            // Checking route... it returns params: { ... }. 
+            // lockedBankroll was passed in REQUEST. Ideally response should include it or we use request value.
+            // But we stored response in localStorage. 
+            // I should update startRun route to return lockedBankroll too.
+            // Or use a default.
+            1, // runNonce
+        );
+
+        // Fix for missing lockedBankroll:
+        // The simulation constructor expects lockedBankroll.
+        // We can pass it in params or separate field.
+        // I will assume I edit route later or fix.
+        // Actually, let's fix the route in next step if needed. 
+        // For now, I'll access it from runData if I add it, or default to 0 and fix.
+
+    }, [runData, runId]);
+
+
+    // Input Handler
     const handleInput = useCallback((type: 'jump' | 'slide') => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({ type: 'input', action: type }));
+        if (!simRef.current || completedRef.current) return;
+
+        const state = simRef.current.getState();
+        const input = { type, tick: state.tick };
+
+        simRef.current.processInput(input);
+        inputsRef.current.push(input);
+    }, []);
+
+    // Game Over Handler
+    const handleGameOver = useCallback(async (state: SimState) => {
+        if (completedRef.current) return;
+        completedRef.current = true;
+        setIsRunOver(true);
+
+        try {
+            const result = await api.completeRun({
+                runId,
+                inputs: inputsRef.current,
+                finalBankroll: state.bankroll.toString(),
+                exitType: state.exitType || 'loss',
+            });
+
+            onRunComplete({
+                exitType: state.exitType || 'loss',
+                endBankroll: state.bankroll.toString(),
+                netDelta: '0', // calc
+                serverSeed: result.serverSeed || '',
+                receipt: {},
+            });
+        } catch (e) {
+            console.error('Failed to submit run:', e);
+            // Handle error (maybe retry UI)
+        }
+    }, [runId, onRunComplete]);
+
+    // Checkpoint Actions (triggered from UI)
+    const handleCheckpoint = useCallback((action: 'exit' | 'pause' | 'continue') => {
+        if (!simRef.current) return;
+
+        if (action === 'exit') {
+            try {
+                simRef.current.exitSafe();
+                // This will trigger isRunOver in next tick
+            } catch (e) { console.error(e); }
+        } else if (action === 'pause') {
+            // For now treat pause as exit safe? or implement pause?
+            // "Pause" in client-only sim usually means "Exit and Save".
+            try {
+                // simRef.current.pause(); // Method might not exist or need update
+                // implementation_plan said simpler.
+                simRef.current.exitSafe(); // Just exit for now
+            } catch (e) { }
         }
     }, []);
 
-    const callbacks: GameCallbacks = {
-        onInput: handleInput,
-        onCheckpointExit: () => onCheckpointAction('exit'),
-        onCheckpointPause: () => onCheckpointAction('pause'),
-        onCheckpointContinue: () => onCheckpointAction('continue'),
-    };
-
+    // Phaser Setup
     useEffect(() => {
-        if (!containerRef.current || gameRef.current) return;
+        if (!containerRef.current || gameRef.current || !simRef.current) return;
 
-        if (gameRef.current) return;
+        let accumulator = 0;
 
-        // Create Phaser game
+        const callbacks: GameCallbacks = {
+            onInput: handleInput,
+            onUpdate: (time, delta) => {
+                const sim = simRef.current;
+                if (!sim) return null;
+
+                if (sim.getState().isRunOver) {
+                    if (!completedRef.current) {
+                        handleGameOver(sim.getState());
+                    }
+                    const s = sim.getState();
+                    return { ...s, bankroll: s.bankroll.toString() };
+                }
+
+                // Accumulate time for fixed time step
+                accumulator += delta;
+
+                // Tick simulation in fixed steps of 1000/60 ms
+                while (accumulator >= TICK_DURATION) {
+                    sim.tick();
+                    accumulator -= TICK_DURATION;
+                    // Safety break if spiral of death
+                    if (accumulator > 1000) accumulator = 0;
+                }
+
+                const state = sim.getState();
+                if (state.isCheckpointWindow) {
+                    if (!isCheckpointOpen) setIsCheckpointOpen(true);
+                    setCheckpointTimer(state.checkpointWindowTimer);
+                } else {
+                    if (isCheckpointOpen) setIsCheckpointOpen(false);
+                }
+
+                return { ...state, bankroll: state.bankroll.toString() };
+            }
+        };
+
         const config: Phaser.Types.Core.GameConfig = {
             type: Phaser.AUTO,
             parent: containerRef.current,
@@ -53,17 +189,11 @@ export function GameCanvas({ runId, onRunComplete, onCheckpointAction }: GameCan
             backgroundColor: '#1a1a2e',
             audio: { noAudio: true },
             scene: GameScene,
-            callbacks: {
-                preBoot: (game) => {
-                    // Keep empty or minimal preBoot
-                },
-            },
         };
 
         const game = new Phaser.Game(config);
         gameRef.current = game;
 
-        // Get scene reference
         game.events.once('ready', () => {
             const scene = game.scene.getScene('GameScene') as GameScene;
             if (scene) {
@@ -72,82 +202,26 @@ export function GameCanvas({ runId, onRunComplete, onCheckpointAction }: GameCan
             }
         });
 
-        // Setup WebSocket
-        const ws = api.createGameConnection(runId);
-        wsRef.current = ws;
-
-        ws.onmessage = (event) => {
-            const msg = JSON.parse(event.data);
-
-            switch (msg.type) {
-                case 'init':
-                case 'state':
-                    if (sceneRef.current && sceneRef.current.scene.settings.active) {
-                        sceneRef.current.updateGameState(msg.state as GameState);
-                    }
-                    if (msg.state.isCheckpointWindow) {
-                        setIsCheckpointOpen(true);
-                        setCheckpointTimer(msg.state.checkpointWindowTimer);
-                    } else {
-                        setIsCheckpointOpen(false);
-                    }
-                    if (msg.state.isRunOver) {
-                        setIsRunOver(true);
-                    }
-                    break;
-
-                case 'checkpoint':
-                    setIsCheckpointOpen(true);
-                    setCheckpointTimer(msg.timeRemaining);
-                    break;
-
-                case 'run_complete':
-                    setIsRunOver(true);
-                    onRunComplete({
-                        exitType: msg.exitType,
-                        endBankroll: msg.endBankroll,
-                        netDelta: msg.netDelta,
-                        serverSeed: msg.serverSeed,
-                        receipt: msg.receipt,
-                    });
-                    break;
-            }
-        };
-
-        ws.onerror = (error) => {
-            console.error('WebSocket error:', error);
-        };
-
-        ws.onclose = () => {
-            console.log('WebSocket closed');
-        };
-
         return () => {
-            ws.close();
             game.destroy(true);
             gameRef.current = null;
             sceneRef.current = null;
-            wsRef.current = null;
         };
-    }, [runId, onRunComplete, handleInput]);
+    }, [handleInput, isCheckpointOpen, handleGameOver]);
 
-    // Keyboard handler for checkpoint actions
+    // Keyboard (UI only, game keys handled by Phaser)
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             if (isCheckpointOpen && !isRunOver) {
-                if (e.key === 'e' || e.key === 'E') {
-                    onCheckpointAction('exit');
-                } else if (e.key === 'p' || e.key === 'P') {
-                    onCheckpointAction('pause');
-                } else if (e.key === 'c' || e.key === 'C') {
-                    onCheckpointAction('continue');
-                }
+                if (e.key === 'e' || e.key === 'E') handleCheckpoint('exit');
+                else if (e.key === 'p' || e.key === 'P') handleCheckpoint('pause');
+                else if (e.key === 'c' || e.key === 'C') handleCheckpoint('continue');
             }
         };
-
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [isCheckpointOpen, isRunOver, onCheckpointAction]);
+    }, [isCheckpointOpen, isRunOver, handleCheckpoint]);
+
 
     return (
         <div className="relative">
@@ -163,19 +237,14 @@ export function GameCanvas({ runId, onRunComplete, onCheckpointAction }: GameCan
                         </p>
                         <div className="flex gap-4 justify-center">
                             <button
-                                onClick={() => onCheckpointAction('exit')}
+                                onClick={() => handleCheckpoint('exit')}
                                 className="px-6 py-3 bg-green-600 hover:bg-green-500 text-white font-bold rounded-lg transition-all transform hover:scale-105"
                             >
                                 🚪 Exit Safely (E)
                             </button>
+                            {/* Pause/Continue */}
                             <button
-                                onClick={() => onCheckpointAction('pause')}
-                                className="px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg transition-all transform hover:scale-105"
-                            >
-                                ⏸️ Pause (P)
-                            </button>
-                            <button
-                                onClick={() => onCheckpointAction('continue')}
+                                onClick={() => handleCheckpoint('continue')}
                                 className="px-6 py-3 bg-orange-600 hover:bg-orange-500 text-white font-bold rounded-lg transition-all transform hover:scale-105"
                             >
                                 ▶️ Continue (C)

@@ -30,6 +30,7 @@ function GamePageContent() {
     const runId = searchParams.get('runId');
 
     const [showSummary, setShowSummary] = useState(false);
+    const [runData, setRunData] = useState<any>(null);
     const [runResult, setRunResult] = useState<{
         exitType: string;
         startBankroll: string;
@@ -38,6 +39,15 @@ function GamePageContent() {
         serverSeed: string;
         receipt: Record<string, unknown>;
     } | null>(null);
+
+    useEffect(() => {
+        if (runId) {
+            const data = localStorage.getItem(`run_${runId}`);
+            if (data) {
+                setRunData(JSON.parse(data));
+            }
+        }
+    }, [runId]);
 
     // Check auth on mount
     useEffect(() => {
@@ -60,24 +70,10 @@ function GamePageContent() {
         setShowSummary(true);
     }, []);
 
-    const handleCheckpointAction = useCallback(async (action: 'exit' | 'pause' | 'continue') => {
-        if (!runId) return;
-
-        if (action === 'exit') {
-            try {
-                await api.checkpointExit(runId);
-            } catch (error) {
-                console.error('Exit failed:', error);
-            }
-        } else if (action === 'pause') {
-            try {
-                await api.checkpointPause(runId);
-            } catch (error) {
-                console.error('Pause failed:', error);
-            }
-        }
-        // Continue just closes the overlay
-    }, [runId]);
+    const handleCheckpointAction = useCallback((action: 'exit' | 'pause' | 'continue') => {
+        // GameCanvas handles logic internally via simulation
+        console.log('Checkpoint action:', action);
+    }, []);
 
     const handleSummaryClose = () => {
         setShowSummary(false);
@@ -120,11 +116,14 @@ function GamePageContent() {
             <main className="container mx-auto px-4 py-8">
                 <div className="flex flex-col items-center gap-6">
                     {/* Game Canvas */}
-                    <GameCanvas
-                        runId={runId}
-                        onRunComplete={handleRunComplete}
-                        onCheckpointAction={handleCheckpointAction}
-                    />
+                    {runData && (
+                        <GameCanvas
+                            runId={runId}
+                            runData={runData}
+                            onRunComplete={handleRunComplete}
+                            onCheckpointAction={handleCheckpointAction}
+                        />
+                    )}
 
                     {/* Controls Guide */}
                     <div className="flex gap-8 text-gray-400">

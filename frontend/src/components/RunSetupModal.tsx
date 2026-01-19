@@ -57,6 +57,9 @@ export function RunSetupModal({ isOpen, onClose, onStart }: RunSetupModalProps) 
                 clientSeed: crypto.randomUUID(),
             });
 
+            // Save run data for client-side simulation
+            localStorage.setItem(`run_${response.runId}`, JSON.stringify(response));
+
             onStart(response.runId, response.params);
         } catch (err) {
             setError((err as Error).message);
